@@ -137,6 +137,7 @@ footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);paddin
           <div class="field"><label for="date">利用日</label><input type="date" id="date"></div>
           <div class="field"><label for="time">開始時刻</label><input type="time" id="time" step="60"></div>
         </div>
+        <label class="check"><input type="checkbox" id="sync" checked>現在の日時に合わせる（手で変えると解除）</label>
         <label class="check"><input type="checkbox" id="holiday">祝日として扱う（祝日は自動判定。臨時の場合だけチェック）</label>
         <div class="daybox" id="daybox"></div>
         <div class="field" id="svcBox" hidden>
@@ -491,9 +492,22 @@ $('#gs').innerHTML=stepper('games','1人あたりゲーム数',30,2);
 $('#lanesBox').innerHTML=stepper('lanes','レーン数',40);
 $('#tickets').innerHTML=Object.entries(RULES.tickets).map(([k,t])=>stepper('t_'+k,t.name,20)).join('');
 
-const SAMPLE={date:'2026-10-06',time:'15:00',counts:{student:1},shoes:{student:1},games:4};
+/* 現在の日本時間を 'YYYY-MM-DD' と 'HH:MM' で返す（端末の設定に関係なく日本時間） */
+function nowJST(){
+  const p={};new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'})
+    .formatToParts(new Date()).forEach(x=>p[x.type]=x.value);
+  return {date:`${p.year}-${p.month}-${p.day}`,time:`${p.hour}:${p.minute}`};
+}
+/* 同期中なら日付・時刻を現在に合わせる。変わったときだけ再計算 */
+function syncClock(){
+  if(!$('#sync').checked)return false;
+  const n=nowJST();
+  if($('#date').value===n.date&&$('#time').value===n.time)return false;
+  $('#date').value=n.date;$('#time').value=n.time;return true;
+}
+const SAMPLE={counts:{},shoes:{},games:2};
 function setForm(s){
-  $('#date').value=s.date;$('#time').value=s.time;$('#holiday').checked=false;$('#reserved').checked=false;
+  $('#sync').checked=true;syncClock();$('#holiday').checked=false;$('#reserved').checked=false;
   CATS.forEach(c=>{$('#c_'+c.id).value=(s.counts||{})[c.id]||0;$('#s_'+c.id).value=(s.shoes||{})[c.id]||0;});
   $('#games').value=s.games;$('#lanes').value=0;$('#svcGames').value='';
   Object.keys(RULES.tickets).forEach(k=>$('#t_'+k).value=0);
@@ -586,8 +600,9 @@ const res=runTests(),pass=res.filter(r=>r.pass).length;
 $('#testSum').textContent=`検証ケース（${pass}/${res.length} 件合格）`;
 $('#testList').innerHTML=res.map(r=>`<li><span class="${r.pass?'p':'f'}">${r.pass?'○':'×'}</span><span>${r.name}${r.errs.length?'<br><span class="hint">'+r.errs.join(' / ')+'</span>':''}</span></li>`).join('');
 
-$('#form').addEventListener('input',render);
-$('#form').addEventListener('change',render);
+$('#form').addEventListener('input',e=>{if(e.target.id==='date'||e.target.id==='time')$('#sync').checked=false;render();});
+$('#form').addEventListener('change',e=>{if(e.target.id==='sync')syncClock();render();});
+setInterval(()=>{if(syncClock())render();},15000);   // 15秒ごとに時計を確認
 $('#form').addEventListener('submit',e=>e.preventDefault());
 $('#form').addEventListener('click',e=>{
   const b=e.target.closest('button[data-for]');if(!b)return;
@@ -595,7 +610,7 @@ $('#form').addEventListener('click',e=>{
   inp.value=Math.min(Number(inp.max),Math.max(0,v));render();
 });
 $('#shoesAll').addEventListener('click',()=>{CATS.forEach(c=>$('#s_'+c.id).value=num('c_'+c.id));render();});
-$('#reset').addEventListener('click',()=>{setForm({date:SAMPLE.date,time:SAMPLE.time,counts:{},shoes:{},games:2});render();});
+$('#reset').addEventListener('click',()=>{setForm(SAMPLE);render();});
 $('#ver').textContent=RULES.version;
 setForm(SAMPLE);render();
 })();
