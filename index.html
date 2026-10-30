@@ -240,7 +240,20 @@ function packBest(cat,g){
   }
   return best;
 }
-function packName(o){const s=[];if(o.n10)s.push('10ゲームパック×'+o.n10);if(o.n5)s.push('5ゲームパック×'+o.n5);return s.join('＋')+(o.rest?`＋通常${o.rest}ゲーム`:'');}
+/* 1人分：パックの外の端数ゲームのうち1ゲームを無料券で無料にする場合の最安
+   （パックに含まれるゲームには無料券は使えない。パックなし＝通常料金だけの組合せも含む） */
+function packBestFree(cat,g){
+  const p5=RULES.pack5.price[cat],p10=RULES.pack10.price[cat],np=RULES.normal[cat];
+  let best=null;
+  for(let a=0;a<=(p10==null?0:Math.floor(g/10));a++)for(let b=0;b<=(p5==null?0:Math.floor(g/5));b++){
+    const games=10*a+5*b,rest=g-games;
+    if(rest<1)continue;                                   // 無料にできる端数ゲームが必要
+    const packCost=a*(p10||0)+b*(p5||0),cost=packCost+(rest-1)*np;
+    if(!best||cost<best.cost)best={cost,packCost,n10:a,n5:b,games,rest,np};
+  }
+  return best;
+}
+function packName(o){if(!o.n10&&!o.n5)return `通常${o.rest}ゲーム`;const s=[];if(o.n10)s.push('10ゲームパック×'+o.n10);if(o.n5)s.push('5ゲームパック×'+o.n5);return s.join('＋')+(o.rest?`＋通常${o.rest}ゲーム`:'');}
 
 function mk(id,name,lines,checks,notes){
   const ch=[...new Set(checks)];
@@ -292,6 +305,43 @@ function ticketVariants(base,types,ctx,out,extraCheck){
   if(eff.length>=2)out.na.add(`無料券・サービスは併用できません。${eff.map(([t])=>RULES.tickets[t].name).join('・')}のうち、最も安くなる1種類だけを使います`);
 }
 
+/* パック＋無料券（一ゲーム無料券・家庭の日無料券）：無料券はパックの外の端数ゲームにだけ使う。
+   例）6ゲーム＝5ゲームパック＋無料1ゲーム、7ゲーム＝5ゲームパック＋無料1ゲーム＋通常1ゲーム */
+function packFreeVariants(perCat,B,ctx,out,shoeLine){
+  ['oneGame','familyDay'].forEach(type=>{
+    const T=RULES.tickets[type],t=ctx.tickets[type]||0;
+    if(!t)return;
+    if(type==='familyDay'&&ctx.counts.child===0)return;   // 理由は通常料金の候補側で表示済み
+    if(type==='oneGame'&&ctx.g<T.minGames)return;
+    // 区分ごとに「無料券を使うと1人いくら得するか」を出し、得の大きい人から券の対象にする
+    const rows=perCat.map(x=>{const f=packBestFree(x.c.id,ctx.g);return Object.assign({},x,{free:f,gain:f?x.cost-f.cost:0,take:0});});
+    let cap=Math.min(ctx.n,T.perTicket*t);
+    [...rows].sort((a,b)=>b.gain-a.gain).forEach(r=>{if(r.gain>0&&cap>0){r.take=Math.min(r.k,cap);cap-=r.take;}});
+    const covered=rows.reduce((s,r)=>s+r.take,0);
+    if(!covered){out.na.add(`5・10ゲームパック＋${T.name}：パックの外の端数ゲームがないため、無料券を使っても安くなりません`);return;}
+    const used=Math.ceil(covered/T.perTicket),L=[];let free=0;
+    rows.forEach(r=>{
+      const np=RULES.normal[r.c.id];
+      if(r.take>0){
+        const f=r.free;
+        L.push({label:`${r.c.label} ${packName(f)}（うち1ゲームは無料券）`,detail:f.n10||f.n5?`（${yen(f.packCost)}＋${yen(np)}×${f.rest}）× ${r.take}名`:`${yen(np)} × ${f.rest}ゲーム × ${r.take}名`,amount:(f.packCost+f.rest*np)*r.take});
+        free+=np*r.take;
+      }
+      const rest=r.k-r.take;
+      if(rest>0){
+        if(r.combo)L.push({label:`${r.c.label} ${packName(r.combo)}`,detail:r.combo.rest?`（${yen(r.combo.packCost)}＋${yen(np)}×${r.combo.rest}）× ${rest}名`:`${yen(r.combo.cost)} × ${rest}名`,amount:r.combo.cost*rest});
+        else L.push({label:`${r.c.label} 通常料金`,detail:`${yen(np)} × ${ctx.g}ゲーム × ${rest}名`,amount:np*ctx.g*rest});
+      }
+    });
+    L.push({label:`${T.name} ${used}枚`,detail:`${covered}名 × 端数1ゲーム無料`,amount:-free});
+    const notes=['パックは1人ずつ購入します（グループで分け合うことはできません）','無料券はパックの外の端数ゲームに使います（パックに含まれるゲームには使えません）'];
+    if(t>used)notes.push(`${T.name}は${used}枚で足ります（入力${t}枚）`);
+    const left=ctx.n-covered;
+    if(left>0)notes.push(`${left}名は無料券の対象外（券の枚数不足、または端数ゲームがなく得にならないため）`);
+    out.candidates.push(mk('pack+'+type,'5・10ゲームパック＋'+T.name,[...L,...shoeLine(ctx.shoes)],[],notes));
+  });
+}
+
 function quote(inp){
   const g=inp.games|0,counts={},shoesBy={},tickets=inp.tickets||{},warnings=[];
   CATS.forEach(c=>{
@@ -320,10 +370,11 @@ function quote(inp){
   ticketVariants(A,['oneGame','familyDay','shoe','invite'],{g,n,shoes,counts,tickets,pg,memberPrice:RULES.normal.member},out);
 
   /* B. 5・10ゲームパック（足りない分は通常料金。パックは1人ずつ） */
-  const bL=[],bN=['パックは1人ずつ購入します（グループで分け合うことはできません）'];
+  const bL=[],bN=['パックは1人ずつ購入します（グループで分け合うことはできません）'],perCat=[];
   let anyPack=false;
   used.forEach(c=>{
     const k=counts[c.id],nCost=RULES.normal[c.id]*g,b=packBest(c.id,g);
+    perCat.push({c,k,cost:b&&b.cost<nCost?b.cost:nCost,combo:b&&b.cost<nCost?b:null});
     if(b&&b.cost<nCost){
       anyPack=true;
       bL.push({label:`${c.label} ${packName(b)}`,detail:b.rest?`（${yen(b.packCost)}＋${yen(b.np)}×${b.rest}）× ${k}名`:`${yen(b.cost)} × ${k}名`,amount:b.cost*k});
@@ -332,11 +383,12 @@ function quote(inp){
     }else bL.push(normLine(c,g,k));
   });
   if(anyPack){
-    const na=heldNames(['oneGame','familyDay','invite']);
+    const na=heldNames(['invite']);
     if(na.length)bN.push(`パック利用時は${na.join('・')}は使えません`);
     const B=mk('pack','5・10ゲームパック',[...bL,...shoeLine(shoes)],[],bN);
     out.candidates.push(B);
     ticketVariants(B,['shoe'],{g,n,shoes,counts,tickets,pg:[],memberPrice:0},out);
+    packFreeVariants(perCat,B,{g,n,counts,tickets,shoes},out,shoeLine);
   }else out.na.add(`5・10ゲームパック：希望${g}ゲームでは通常料金の方が安くなります`);
 
   /* C. 時間帯サービス（全区分一律。境目を過ぎてから開始したゲームだけに適用） */
@@ -438,7 +490,16 @@ const TESTS=[
   {name:'団体：4ゲームは団体パック対象外（他プランで計算）',inp:{counts:{general:12},games:4,reserved:true,lanes:6},exp:{not:['group'],has:[['pack',24000]]}},
   {name:'一ゲーム無料券1枚・一般6名・2ゲーム',inp:{counts:{general:6},shoes:{general:6},tickets:{oneGame:1}},exp:{bestOk:['normal+oneGame',6180]}},
   {name:'一ゲーム無料券は1ゲーム利用では使えない',inp:{counts:{general:2},games:1,tickets:{oneGame:1}},exp:{not:['normal+oneGame']}},
-  {name:'一ゲーム無料券はパックと併用しない',inp:{counts:{general:1},games:5,tickets:{oneGame:1}},exp:{not:['pack+oneGame'],has:[['pack',2000],['normal+oneGame',2600]]}},
+  {name:'5ゲームちょうどならパックに無料券は使えない（端数がない）',inp:{counts:{general:1},games:5,tickets:{oneGame:1}},exp:{not:['pack+oneGame'],has:[['pack',2000],['normal+oneGame',2600]]}},
+  {name:'6ゲーム：5ゲームパック＋一ゲーム無料券1ゲーム → 2,000円',inp:{counts:{general:1},games:6,tickets:{oneGame:1}},exp:{bestOk:['pack+oneGame',2000],has:[['pack',2650]]}},
+  {name:'7ゲーム：5ゲームパック＋無料1ゲーム＋通常1ゲーム → 2,650円（10ゲームパック3,200円より安い）',inp:{counts:{general:1},games:7,tickets:{oneGame:1}},exp:{bestOk:['pack+oneGame',2650],has:[['pack',3200]]}},
+  {name:'6ゲーム団体（一般2＋子1）：5ゲームパック＋家庭の日無料券 → 5,700円',inp:{counts:{general:2,child:1},games:6,tickets:{familyDay:1}},exp:{bestOk:['pack+familyDay',5700],has:[['pack',7550]]}},
+  {name:'家庭の日無料券は大人だけならパックでも使えない',inp:{counts:{general:2},games:6,tickets:{familyDay:1}},exp:{not:['pack+familyDay'],bestOk:['pack',5300]}},
+  {name:'一般7名・6ゲーム・一ゲーム無料券1枚 → 6名だけ無料（1名は2,650円）',inp:{counts:{general:7},games:6,tickets:{oneGame:1}},exp:{bestOk:['pack+oneGame',14650]}},
+  {name:'一般7名・6ゲーム・一ゲーム無料券2枚 → 全員無料（1枚余り）',inp:{counts:{general:7},games:6,tickets:{oneGame:2}},exp:{bestOk:['pack+oneGame',14000]}},
+  {name:'11ゲーム：10ゲームパック＋無料1ゲーム → 3,200円',inp:{counts:{general:1},games:11,tickets:{oneGame:1}},exp:{bestOk:['pack+oneGame',3200]}},
+  {name:'9ゲームは10ゲームパックの方が安く、無料券を使っても得にならない',inp:{counts:{general:1},games:9,tickets:{oneGame:1}},exp:{bestOk:['pack',3200],not:['pack+oneGame']}},
+  {name:'パック＋一ゲーム無料券＋貸し靴は併用で靴代が加算',inp:{counts:{general:1},shoes:{general:1},games:6,tickets:{oneGame:1}},exp:{bestOk:['pack+oneGame',2380]}},
   {name:'家庭の日券は大人のみのグループで使えない',inp:{counts:{general:4},tickets:{familyDay:1}},exp:{not:['normal+familyDay']}},
   {name:'家庭の日券1枚・一般2＋子3・2ゲーム・全員靴',inp:{counts:{general:2,child:3},shoes:{general:2,child:3},tickets:{familyDay:1}},exp:{bestOk:['normal+familyDay',4850],has:[['family',6500]]}},
   {name:'貸し靴無料券1枚・一般1名',inp:{counts:{general:1},shoes:{general:1},tickets:{shoe:1}},exp:{bestOk:['normal+shoe',1300]}},
@@ -586,11 +647,11 @@ const rows=[
   ...R.services.map(s=>[s.name,`1ゲーム ${cell(s.price)}（全区分一律）`,`${s.cond}。境目を過ぎてから開始したゲームに適用。重なれば最安を適用`]),
   ['ファミリーパック',`2ゲーム＋貸し靴 1人 ${cell(R.family.price)}`,'中学生以下と保護者（学生も可）が各1名以上。グループの一部だけに適用可'],
   ['団体予約',`2ゲーム ${cell(R.group.price[2])}／3ゲーム ${cell(R.group.price[3])}（貸し靴付・1人）`,'10名以上・前日までの予約・5レーン以上。4ゲーム以上は他プラン'],
-  ['一ゲーム無料券','1枚で最大6名×1ゲーム','2ゲーム以上。パック・サービスと併用不可'],
+  ['一ゲーム無料券','1枚で最大6名×1ゲーム','2ゲーム以上。サービスと併用不可。パックとは、パックの外の端数ゲームになら使える（例：6ゲーム＝5ゲームパック＋無料1ゲーム）'],
   ['貸し靴無料券','1枚で1名分','団体・ファミリーパック・サービスと併用不可。5・10パックとは併用可'],
-  ['家庭の日無料券','1枚で最大5名×1ゲーム','日付の制限なし。サービス併用不可。高校生以上のみは不可'],
+  ['家庭の日無料券','1枚で最大5名×1ゲーム','日付の制限なし。サービス併用不可。高校生以上のみは不可。パックとは、パックの外の端数ゲームになら使える'],
   ['無料招待券','1枚＝会員1名×1ゲーム','時間帯サービス中も可。5・10パックとは併用不可'],
-  ['併用の原則','—','無料券・サービスは基本的に併用不可で、条件のよい方を優先。例外：パック＋貸し靴無料券、時間帯サービス＋無料招待券'],
+  ['併用の原則','—','無料券・サービスは基本的に併用不可で、条件のよい方を優先。例外：パック＋貸し靴無料券、パック＋端数ゲームへの一ゲーム無料券・家庭の日無料券、時間帯サービス＋無料招待券'],
   ['途中でやめた場合','—','実際に遊んだゲーム数で再計算する'],
   ['営業時間','平日・土曜 10:00〜23:00／日曜・祝日 8:00〜23:00','営業時間外の開始時刻は警告を表示'],
   ['適用除外日','—','年末年始・貸切日などの扱いは保留中（未反映）']
