@@ -409,33 +409,100 @@ function quote(inp){
     out.na.add(`${pool.map(s=>s.name).join('・')}：サービス対象のゲーム数が0です（境目をまたぐ場合は「サービス対象のゲーム数」を選択）`);
   }else out.na.add('時間帯サービス：該当なし（ナイト 21:00以降／早朝 日祝8:00〜10:00／感謝Day 毎月22日）');
 
-  /* D. ファミリーパック（一部の人だけに適用可） */
+  /* D. ファミリーパック（一部の人だけに適用可。3ゲーム以上は、足りない分を通常料金で追加） */
   const F=RULES.family,adults=counts.general+counts.member+counts.student,eWhy=[];
-  if(g!==F.games)eWhy.push(`2ゲーム専用（希望${g}ゲーム）`);
+  if(g<F.games)eWhy.push(`2ゲーム以上が条件（希望${g}ゲーム）`);
   if(counts.child<1)eWhy.push('中学生以下が0名');
   if(adults<1)eWhy.push('保護者（大人）が0名');
   if(eWhy.length)out.na.add('ファミリーパック：'+eWhy.join('、'));
   else{
-    // 1人ずつ「ファミリーパック」と「通常2ゲーム（＋貸し靴）」を比べ、得する人に適用
+    const extra=g-F.games;                      // ファミリーパックの2ゲームを超える分（通常料金）
+    // 区分×貸し靴の有無ごとに、「ファミリーパック」と「それ以外（通常料金か5・10ゲームパック）」を比べる
     const grp=[];
-    used.forEach(c=>{const k=counts[c.id],s=shoesBy[c.id];
-      [[true,s],[false,k-s]].forEach(([shoe,m])=>{if(m>0){const alt=RULES.normal[c.id]*g+(shoe?RULES.shoes:0);grp.push({cat:c.id,shoe,count:m,delta:F.price-alt,take:0});}});});
-    grp.forEach(x=>{if(x.delta<0)x.take=x.count;});
-    const has=p=>grp.some(x=>x.take>0&&p(x));
-    const force=p=>{if(has(p))return true;const x=grp.filter(y=>p(y)&&y.take<y.count).sort((a,b)=>a.delta-b.delta||(b.shoe-a.shoe))[0];if(x){x.take++;return true;}return false;};
-    force(x=>x.cat==='child');
+    used.forEach(c=>{
+      const k=counts[c.id],s=shoesBy[c.id],np=RULES.normal[c.id],pb=packBest(c.id,g);
+      const oth=pb&&pb.cost<np*g?{cost:pb.cost,combo:pb}:{cost:np*g,combo:null};
+      [[true,s],[false,k-s]].forEach(([shoe,m])=>{if(m>0){
+        const fam=F.price+extra*np,alt=oth.cost+(shoe?RULES.shoes:0);
+        grp.push({c,cat:c.id,shoe,count:m,np,oth,delta:fam-alt,take:0});
+      }});
+    });
     const gm=x=>x.cat==='general'||x.cat==='member';
-    if(!has(x=>x.cat!=='child')){if(!force(gm))force(x=>x.cat==='student');}   // 保護者は一般・会員を優先、いなければ学生
-    const famN=grp.reduce((s,x)=>s+x.take,0),dL=[{label:'ファミリーパック（2ゲーム＋貸し靴）',detail:`${yen(F.price)} × ${famN}名`,amount:F.price*famN}];
-    const dN=['中学生以下と保護者（学生も可）が各1名以上いることを受付で確認してください'],dC=[];
-    if(famN<n){
-      used.forEach(c=>{const r=counts[c.id]-grp.filter(x=>x.cat===c.id).reduce((s,x)=>s+x.take,0);if(r>0)dL.push(normLine(c,g,r));});
-      const restShoes=grp.filter(x=>x.shoe).reduce((s,x)=>s+x.count-x.take,0);
-      dL.push(...shoeLine(restShoes));
-      dN.push(`ファミリーパックは${famN}名に適用。残り${n-famN}名は通常料金の方が安いため通常料金で計算`);
-    }
-    const na=heldNames(['oneGame','familyDay','shoe']);if(na.length)dN.push(`この案では${na.join('・')}は当てていません`);
-    out.candidates.push(mk('family',famN<n?`ファミリーパック${famN}名＋通常料金`:'ファミリーパック',dL,dC,dN));
+    /* 誰にファミリーパックを当てるか決める。withTicket なら「無料券を使ったあとの料金」で比べる */
+    const assign=withTicket=>{
+      grp.forEach(x=>{
+        let d=x.delta;
+        if(withTicket){
+          const f=packBestFree(x.cat,g),othT=Math.min(x.oth.cost,f?f.cost:Infinity)+(x.shoe?RULES.shoes:0);
+          d=(F.price+extra*x.np-(extra>0?x.np:0))-othT;
+        }
+        x.d=d;x.take=d<0?x.count:0;
+      });
+      const has=p=>grp.some(x=>x.take>0&&p(x));
+      const force=p=>{if(has(p))return true;const x=grp.filter(y=>p(y)&&y.take<y.count).sort((a,b)=>a.d-b.d||(b.shoe-a.shoe))[0];if(x){x.take++;return true;}return false;};
+      force(x=>x.cat==='child');
+      if(!has(x=>x.cat!=='child')){if(!force(gm))force(x=>x.cat==='student');}   // 保護者は一般・会員を優先、いなければ学生
+      return grp.reduce((s,x)=>s+x.take,0);
+    };
+    let famN=0;
+
+    /* 料金の内訳を作る。type を渡すと、その無料券を端数ゲーム（パックの外のゲーム）に当てた案になる */
+    const build=type=>{
+      famN=assign(!!type);
+      const T=type?RULES.tickets[type]:null,L=[],N=['中学生以下と保護者（学生も可）が各1名以上いることを受付で確認してください'];
+      // 無料券の割り当て：得の大きい人から
+      const slots=[];
+      grp.forEach(x=>{
+        if(x.take>0&&extra>0)slots.push({x,kind:'fam',count:x.take,gain:x.np});
+        const o=x.count-x.take;
+        if(o>0){const f=packBestFree(x.cat,g);if(f&&x.oth.cost-f.cost>0)slots.push({x,kind:'oth',count:o,gain:x.oth.cost-f.cost,f});}
+      });
+      let cap=T?Math.min(n,T.perTicket*(tickets[type]||0)):0,covered=0,free=0;
+      const tk=new Map();
+      slots.sort((a,b)=>b.gain-a.gain).forEach(sl=>{if(cap>0){const m=Math.min(sl.count,cap);cap-=m;covered+=m;tk.set(sl,m);}});
+      if(T&&!covered)return null;
+      // ファミリーパックの人
+      L.push({label:'ファミリーパック（2ゲーム＋貸し靴）',detail:`${yen(F.price)} × ${famN}名`,amount:F.price*famN});
+      used.forEach(c=>{
+        const fk=grp.filter(x=>x.cat===c.id).reduce((s,x)=>s+x.take,0);
+        if(extra>0&&fk>0)L.push({label:`${c.label} 追加${extra}ゲーム（ファミリーパックの人）`,detail:`${yen(RULES.normal[c.id])} × ${extra}ゲーム × ${fk}名`,amount:RULES.normal[c.id]*extra*fk});
+      });
+      // ファミリーパック以外の人
+      used.forEach(c=>{
+        const gs=grp.filter(x=>x.cat===c.id),np=RULES.normal[c.id];
+        const others=gs.reduce((s,x)=>s+x.count-x.take,0);
+        let withT=0,f=null;
+        slots.forEach(sl=>{if(sl.kind==='oth'&&sl.x.cat===c.id&&tk.get(sl)){withT+=tk.get(sl);f=sl.f;}});
+        const noT=others-withT,oth=gs[0].oth;
+        if(withT>0)L.push({label:`${c.label} ${packName(f)}（うち1ゲームは無料券）`,detail:f.n10||f.n5?`（${yen(f.packCost)}＋${yen(np)}×${f.rest}）× ${withT}名`:`${yen(np)} × ${f.rest}ゲーム × ${withT}名`,amount:(f.packCost+f.rest*np)*withT});
+        if(noT>0){
+          if(oth.combo)L.push({label:`${c.label} ${packName(oth.combo)}`,detail:oth.combo.rest?`（${yen(oth.combo.packCost)}＋${yen(np)}×${oth.combo.rest}）× ${noT}名`:`${yen(oth.combo.cost)} × ${noT}名`,amount:oth.combo.cost*noT});
+          else L.push(normLine(c,g,noT));
+        }
+      });
+      L.push(...shoeLine(grp.filter(x=>x.shoe).reduce((s,x)=>s+x.count-x.take,0)));
+      if(T){
+        slots.forEach(sl=>{const m=tk.get(sl);if(m)free+=sl.x.np*m;});
+        const usedT=Math.ceil(covered/T.perTicket);
+        L.push({label:`${T.name} ${usedT}枚`,detail:`${covered}名 × 端数1ゲーム無料`,amount:-free});
+        N.push('無料券はパックの外の端数ゲームに使います（ファミリーパックの2ゲームには使えません）');
+        if((tickets[type]||0)>usedT)N.push(`${T.name}は${usedT}枚で足ります（入力${tickets[type]}枚）`);
+        if(n-covered>0)N.push(`${n-covered}名は無料券の対象外（券の枚数不足、または端数ゲームがなく得にならないため）`);
+      }
+      if(famN<n)N.push(`ファミリーパックは${famN}名に適用。残り${n-famN}名はほかの料金の方が安いため、そちらで計算`);
+      if(extra>0)N.push(`ファミリーパックは2ゲーム分。残り${extra}ゲームは通常料金で追加`);
+      const base=famN<n?`ファミリーパック${famN}名＋ほかの料金`:'ファミリーパック';
+      return mk(type?'family+'+type:'family',type?base+'＋'+T.name:base,L,[],N);
+    };
+    const D=build(null);
+    const na=heldNames(['shoe']);if(na.length)D.notes.push(`ファミリーパックには${na.join('・')}は使えません（貸し靴込みのため）`);
+    out.candidates.push(D);
+    ['oneGame','familyDay'].forEach(type=>{
+      if(!(tickets[type]||0))return;
+      const v=build(type);
+      if(v)out.candidates.push(v);
+      else out.na.add(`ファミリーパック＋${RULES.tickets[type].name}：2ゲームちょうどのため、無料券を使える端数ゲームがありません`);
+    });
   }
 
   /* E. 団体予約（4ゲーム以上は別プラン） */
@@ -475,7 +542,11 @@ const TESTS=[
   {name:'ファミリーパック一部適用：一般2（靴1）＋子1（靴1）→ 靴なしの1名は通常',inp:{counts:{general:2,child:1},shoes:{general:1,child:1}},exp:{bestOk:['family',3900],has:[['normal',4460]]}},
   {name:'ファミリーパック：会員（靴あり）＋子（靴あり）→ 保護者として会員を含めて2,600円',inp:{counts:{member:1,child:1},shoes:{member:1,child:1}},exp:{bestOk:['family',2600],has:[['normal',2760]]}},
   {name:'ファミリーパックは中学生以下がいないと対象外',inp:{counts:{general:2},shoes:{general:2}},exp:{not:['family']}},
-  {name:'ファミリーパックは3ゲームでは対象外',inp:{counts:{general:1,child:1},games:3},exp:{not:['family']}},
+  {name:'ファミリーパック3ゲーム：2ゲーム分＋通常1ゲーム（全員靴）→ 3,800円',inp:{counts:{general:1,child:1},shoes:{general:1,child:1},games:3},exp:{bestOk:['family',3800],has:[['normal',4360]]}},
+  {name:'ファミリーパック3ゲーム＋一ゲーム無料券 → 追加の1ゲームが無料で2,600円',inp:{counts:{general:1,child:1},shoes:{general:1,child:1},games:3,tickets:{oneGame:1}},exp:{bestOk:['family+oneGame',2600]}},
+  {name:'ファミリーパック4ゲーム＋家庭の日無料券 → 全員ファミリーパック、追加2ゲームのうち1ゲーム無料で7,600円',inp:{counts:{general:2,child:2},shoes:{general:2,child:2},games:4,tickets:{familyDay:1}},exp:{bestOk:['family+familyDay',7600],has:[['normal+familyDay',8720]]}},
+  {name:'ファミリーパック2ゲームちょうどでは無料券は使えない（通常料金＋無料券の方が安い）',inp:{counts:{general:1,child:1},shoes:{general:1,child:1},tickets:{oneGame:1}},exp:{not:['family+oneGame'],has:[['family',2600]],bestOk:['normal+oneGame',1960]}},
+  {name:'ファミリーパックは1ゲームでは対象外',inp:{counts:{general:1,child:1},games:1},exp:{not:['family']}},
   {name:'会員1名 21:00 → ナイト（全区分一律400円）',inp:{counts:{member:1},shoes:{member:1},time:'21:00'},exp:{svc:['night'],bestOk:['service',1180],has:[['normal',1280]]}},
   {name:'一般・学生・子ども混在の21:00 → ナイトは全員400円',inp:{counts:{general:1,student:1,child:1},time:'21:00'},exp:{bestOk:['service',2400]}},
   {name:'22日21:30は感謝Dayとナイトが重複 → 安い感謝Day（確定）',inp:{counts:{general:1},date:'2026-10-22',time:'21:30'},exp:{svc:['fan','night'],bestOk:['service',500]}},
@@ -645,7 +716,7 @@ const rows=[
   ['5ゲームパック',per(R.pack5.price),'貸し靴別。1人ずつ購入（分け合い不可）。不足分は通常料金で追加可'],
   ['10ゲームパック',per(R.pack10.price),'中学生以下は学生と同額。条件は5ゲームパックと同じ'],
   ...R.services.map(s=>[s.name,`1ゲーム ${cell(s.price)}（全区分一律）`,`${s.cond}。境目を過ぎてから開始したゲームに適用。重なれば最安を適用`]),
-  ['ファミリーパック',`2ゲーム＋貸し靴 1人 ${cell(R.family.price)}`,'中学生以下と保護者（学生も可）が各1名以上。グループの一部だけに適用可'],
+  ['ファミリーパック',`2ゲーム＋貸し靴 1人 ${cell(R.family.price)}`,'中学生以下と保護者（学生も可）が各1名以上。グループの一部だけに適用可。3ゲーム以上は、足りない分を通常料金で追加（その端数ゲームには一ゲーム無料券・家庭の日無料券を使える）'],
   ['団体予約',`2ゲーム ${cell(R.group.price[2])}／3ゲーム ${cell(R.group.price[3])}（貸し靴付・1人）`,'10名以上・前日までの予約・5レーン以上。4ゲーム以上は他プラン'],
   ['一ゲーム無料券','1枚で最大6名×1ゲーム','2ゲーム以上。サービスと併用不可。パックとは、パックの外の端数ゲームになら使える（例：6ゲーム＝5ゲームパック＋無料1ゲーム）'],
   ['貸し靴無料券','1枚で1名分','団体・ファミリーパック・サービスと併用不可。5・10パックとは併用可'],
